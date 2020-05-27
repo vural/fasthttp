@@ -289,6 +289,11 @@ type Client struct {
 	// By default will not waiting, return ErrNoFreeConns immediately
 	MaxConnWaitTimeout time.Duration
 
+	// RetryIf controls whether a retry should be attempted after an error.
+	//
+	// By default will use isIdempotent function
+	RetryIf RetryIfFunc
+
 	mLock sync.Mutex
 	m     map[string]*HostClient
 	ms    map[string]*HostClient
@@ -493,6 +498,7 @@ func (c *Client) Do(req *Request, resp *Response) error {
 			DisableHeaderNamesNormalizing: c.DisableHeaderNamesNormalizing,
 			DisablePathNormalizing:        c.DisablePathNormalizing,
 			MaxConnWaitTimeout:            c.MaxConnWaitTimeout,
+			RetryIf:                       c.RetryIf,
 		}
 		m[string(host)] = hc
 		if len(m) == 1 {
@@ -559,6 +565,9 @@ const DefaultMaxIdemponentCallAttempts = 5
 //   - foobar.com:443
 //   - foobar.com:8080
 type DialFunc func(addr string) (net.Conn, error)
+
+// RetryIfFunc signature of retry if function
+type RetryIfFunc func(request *Request) bool
 
 // HostClient balances http requests among hosts listed in Addr.
 //
@@ -697,6 +706,11 @@ type HostClient struct {
 	//
 	// By default will not waiting, return ErrNoFreeConns immediately
 	MaxConnWaitTimeout time.Duration
+
+	// RetryIf controls whether a retry should be attempted after an error.
+	//
+	// By default will use isIdempotent function
+	RetryIf RetryIfFunc
 
 	clientName  atomic.Value
 	lastUseTime uint32
@@ -1183,6 +1197,12 @@ func (c *HostClient) Do(req *Request, resp *Response) error {
 	if maxAttempts <= 0 {
 		maxAttempts = DefaultMaxIdemponentCallAttempts
 	}
+
+	retryIf := isIdempotent
+	if c.RetryIf != nil {
+		retryIf = c.RetryIf
+	}
+
 	attempts := 0
 	hasBodyStream := req.IsBodyStream()
 
@@ -1196,7 +1216,7 @@ func (c *HostClient) Do(req *Request, resp *Response) error {
 		if hasBodyStream {
 			break
 		}
-		if !isIdempotent(req) {
+		if !retryIf(req) {
 			// Retry non-idempotent requests if the server closes
 			// the connection before sending the response.
 			//
